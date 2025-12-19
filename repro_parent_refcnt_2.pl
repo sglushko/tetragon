@@ -98,10 +98,10 @@ sub chain_long_child {
 if ($mode eq 'root') {
     # For each invocation pick one of the scenarios at random.
     my @scenarios = (
-        \&scenario_long_parent_short_child,
-        \&scenario_short_parent_long_child,
+        # \&scenario_long_parent_short_child,
+        # \&scenario_short_parent_long_child,
         sub { chain_long_parent($chain_depth) },
-        sub { chain_long_child($chain_depth) },
+        # sub { chain_long_child($chain_depth) },
     );
 
     my $idx = int(rand(@scenarios));
