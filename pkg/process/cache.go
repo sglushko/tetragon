@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -121,8 +122,28 @@ func (pc *Cache) refDec(p *ProcessInternal, reason string) {
 	p.refcntOpsLock.Lock()
 	// count number of times refcnt is decremented for a specific reason (i.e. process, parent, etc.)
 	p.refcntOps[reason]++
+	opsCopy := maps.Clone(p.refcntOps)
 	p.refcntOpsLock.Unlock()
 	ref := p.refcnt.Add(^uint32(0))
+
+	msg := "DEBUG_REFCNT: refDec"
+
+	if ref > 0x7FFFFFFF {
+		msg += " refcnt underflow"
+	}
+
+	logger.GetLogger().Warn(msg,
+		"exec_id", p.process.ExecId,
+		"pid", p.process.Pid.GetValue(),
+		"binary", p.process.Binary,
+		"parent_exec_id", p.process.ParentExecId,
+		"reason", reason,
+		"new_refcnt", ref,
+		"refcnt_ops", opsCopy,
+		"proc_ptr", fmt.Sprintf("%p", p),
+		"stack", string(debug.Stack()),
+	)
+
 	if ref == 0 {
 		pc.deletePending(p)
 	}
@@ -133,7 +154,18 @@ func (pc *Cache) refInc(p *ProcessInternal, reason string) {
 	// count number of times refcnt is increamented for a specific reason (i.e. process, parent, etc.)
 	p.refcntOps[reason]++
 	p.refcntOpsLock.Unlock()
-	p.refcnt.Add(1)
+	newRef := p.refcnt.Add(1)
+
+	logger.GetLogger().Warn("DEBUG_REFCNT: refInc",
+		"exec_id", p.process.ExecId,
+		"pid", p.process.Pid.GetValue(),
+		"binary", p.process.Binary,
+		"parent_exec_id", p.process.ParentExecId,
+		"reason", reason,
+		"new_refcnt", newRef,
+		"proc_ptr", fmt.Sprintf("%p", p),
+		"stack", string(debug.Stack()),
+	)
 }
 
 func (pc *Cache) purge() {

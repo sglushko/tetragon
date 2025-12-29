@@ -5,6 +5,7 @@ package process
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -548,15 +549,36 @@ func GetAncestorProcessesInternal(execId string) ([]*ProcessInternal, error) {
 // AddExecEvent constructs a new ProcessInternal structure from an Execve event, adds it to the cache, and also returns it
 func AddExecEvent(event *tetragonAPI.MsgExecveEventUnix) *ProcessInternal {
 	var proc *ProcessInternal
+	
 	if event.Msg.CleanupProcess.Ktime == 0 || event.Process.Flags&api.EventClone != 0 {
+		logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent using Parent from Msg", "pid", event.Process.PID)
 		// there is a case where we cannot find this entry in execve_map
 		// in that case we use as parent what Linux knows
 		proc = initProcessInternalExec(event, event.Msg.Parent)
 	} else {
+		logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent using CleanupProcess as Parent", "pid", event.Process.PID, "cleanup_pid", event.Msg.CleanupProcess.Pid)
 		proc = initProcessInternalExec(event, event.Msg.CleanupProcess)
 	}
 
+	// Check if we are overwriting an existing process
+	if oldProc, err := procCache.get(proc.process.ExecId); err == nil {
+		oldRef := oldProc.refcnt.Load()
+		if oldRef > 1 {
+			logger.GetLogger().Warn("AddExecEvent: overwriting process with active references",
+				"exec_id", proc.process.ExecId,
+				"old_refcnt", oldRef,
+				"new_refcnt", proc.refcnt.Load(),
+				"old_ops", oldProc.refcntOps,
+			)
+		}
+	}
+
 	procCache.add(proc)
+	logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent added",
+		"exec_id", proc.process.ExecId,
+		"pid", proc.process.Pid.GetValue(),
+		"refcnt", proc.refcnt.Load(),
+		"proc_ptr", fmt.Sprintf("%p", proc))
 	return proc
 }
 
@@ -580,6 +602,14 @@ func AddCloneEvent(event *tetragonAPI.MsgCloneEvent) (*ProcessInternal, error) {
 
 	parent.RefInc("parent")
 	procCache.add(proc)
+	logger.GetLogger().Warn("DEBUG_REFCNT: AddCloneEvent added",
+		"exec_id", proc.process.ExecId,
+		"pid", proc.process.Pid.GetValue(),
+		"parent_exec_id", parentExecId,
+		"parent_pid", event.Parent.Pid,
+		"refcnt", proc.refcnt.Load(),
+		"proc_ptr", fmt.Sprintf("%p", proc),
+		"parent_ptr", fmt.Sprintf("%p", parent))
 	return proc, nil
 }
 

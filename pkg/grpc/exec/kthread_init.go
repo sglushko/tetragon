@@ -27,6 +27,7 @@ func (msg *MsgKThreadInitUnix) HandleMessage() *tetragon.GetEventsResponse {
 		logger.GetLogger().Warn(fmt.Sprintf("Failed to find parent for kernel thread %d", msg.Unix.Msg.Parent.Pid))
 		return nil
 	}
+	logger.GetLogger().Warn("DEBUG_REFCNT: MsgKThreadInitUnix.HandleMessage inc parent", "pid", proc.UnsafeGetProcess().Pid.GetValue(), "parent_pid", parent.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg), "parent_ptr", fmt.Sprintf("%p", parent))
 	parent.RefInc("parent")
 	return nil
 }

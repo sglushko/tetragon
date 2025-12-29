@@ -5,6 +5,7 @@ package exec
 
 import (
 	"errors"
+	"fmt"
 
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
@@ -45,8 +46,21 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 	var tetragonAncestors []*tetragon.Process
 	var ancestors []*process.ProcessInternal
 
+	if event.Unix != nil && event.Unix.Msg != nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExec event details",
+			"pid", event.Unix.Process.PID,
+			"tid", event.Unix.Process.TID,
+			"flags", event.Unix.Process.Flags,
+			"cleanup_pid", event.Unix.Msg.CleanupProcess.Pid,
+			"cleanup_ktime", event.Unix.Msg.CleanupProcess.Ktime,
+			"parent_msg_pid", event.Unix.Msg.Parent.Pid,
+			"parent_msg_ktime", event.Unix.Msg.Parent.Ktime,
+		)
+	}
+
 	proc := process.AddExecEvent(event.Unix)
 	tetragonProcess := proc.UnsafeGetProcess()
+	tetragonProcessCopy := proc.GetProcessCopy()
 
 	parentId := tetragonProcess.ParentExecId
 	processId := tetragonProcess.ExecId
@@ -55,6 +69,16 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 	if err == nil {
 		tetragonParent = parent.UnsafeGetProcess()
 	}
+	logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExec event details",
+		"pid", tetragonProcess.Pid.GetValue(),
+		"tid", tetragonProcess.Tid.GetValue(),
+		"flags", tetragonProcess.Flags,
+		"parent_id", parentId,
+		"process_id", processId,
+		"parent", tetragonParent,
+		"proc", proc,
+		"tetragonParentExecId", tetragonProcessCopy.GetParentExecId(),
+	)
 
 	// Set the ancestors only if --enable-ancestors flag includes 'base'.
 	if option.Config.EnableProcessAncestors && proc.NeededAncestors() {
@@ -98,10 +122,12 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 
 	if option.Config.EnableProcessAncestors {
 		for _, ancestor := range ancestors {
+			logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExec inc ancestor", "pid", tetragonProcess.Pid.GetValue(), "ancestor_pid", ancestor.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", event))
 			ancestor.RefInc("ancestor")
 		}
 	}
 	if parent != nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExec inc parent", "pid", tetragonProcess.Pid.GetValue(), "parent_pid", parent.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", event))
 		parent.RefInc("parent")
 	}
 
@@ -121,9 +147,11 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 
 	// do we need to cleanup anything?
 	if cleanupEvent := event.getCleanupEvent(); cleanupEvent != nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExec triggering cleanup", "cleanup_ptr", fmt.Sprintf("%p", cleanupEvent), "msg_ptr", fmt.Sprintf("%p", event))
 		cleanupEvent.HandleMessage()
 	}
 
+	logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExec done", "pid", tetragonProcess.Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", event))
 	return tetragonEvent
 }
 
@@ -226,6 +254,7 @@ func (msg *MsgExecveEventUnix) Retry(internal *process.ProcessInternal, ev notif
 			eventcache.CacheRetries(eventcache.ParentInfo).Inc()
 			return err
 		}
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgExecveEventUnix.Retry inc parent", "pid", tetragonProcess.Pid.GetValue(), "parent_pid", parent.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg), "parent_ptr", fmt.Sprintf("%p", parent))
 		parent.RefInc("parent")
 		ev.SetParent(parent.UnsafeGetProcess())
 		msg.RefCntDone[ParentRefCnt] = true
@@ -242,6 +271,7 @@ func (msg *MsgExecveEventUnix) Retry(internal *process.ProcessInternal, ev notif
 			var tetragonAncestors []*tetragon.Process
 			for _, ancestor := range ancestors {
 				tetragonAncestors = append(tetragonAncestors, ancestor.UnsafeGetProcess())
+				logger.GetLogger().Warn("DEBUG_REFCNT: MsgExecveEventUnix.Retry inc ancestor", "pid", tetragonProcess.Pid.GetValue(), "ancestor_pid", ancestor.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg), "ancestor_ptr", fmt.Sprintf("%p", ancestor))
 				ancestor.RefInc("ancestor")
 			}
 			ev.SetAncestors(tetragonAncestors)
@@ -271,6 +301,7 @@ func (msg *MsgExecveEventUnix) Retry(internal *process.ProcessInternal, ev notif
 		// Retry() is going to be executed in the cache loop handling function, but
 		// HandleMessage may enqueue something in the cache channel. To avoid a deadlock,
 		// execute the cleanup message handling in a separate goroutine.
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgExecveEventUnix.Retry triggering cleanup async", "cleanup_ptr", fmt.Sprintf("%p", cleanupEvent), "msg_ptr", fmt.Sprintf("%p", msg))
 		go cleanupEvent.HandleMessage()
 	}
 
@@ -279,6 +310,8 @@ func (msg *MsgExecveEventUnix) Retry(internal *process.ProcessInternal, ev notif
 
 func (msg *MsgExecveEventUnix) HandleMessage() *tetragon.GetEventsResponse {
 	var res *tetragon.GetEventsResponse
+
+	logger.GetLogger().Warn("DEBUG_REFCNT: MsgExecveEventUnix.HandleMessage start", "msg_ptr", fmt.Sprintf("%p", msg))
 
 	msg.RefCntDone = [3]bool{true, false, false}
 	if e := GetProcessExec(msg, true); e != nil {
@@ -354,6 +387,7 @@ func (msg *MsgCloneEventUnix) Retry(internal *process.ProcessInternal, _ notify.
 	if option.Config.EnableProcessAncestors && internal.NeededAncestors() {
 		if ancestors, err := process.GetAncestorProcessesInternal(tetragonProcess.ParentExecId); err == nil {
 			for _, ancestor := range ancestors {
+				logger.GetLogger().Warn("DEBUG_REFCNT: MsgCloneEventUnix.Retry inc ancestor", "pid", tetragonProcess.Pid.GetValue(), "ancestor_pid", ancestor.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg), "ancestor_ptr", fmt.Sprintf("%p", ancestor))
 				ancestor.RefInc("ancestor")
 			}
 		} else {
@@ -392,6 +426,7 @@ func (msg *MsgCloneEventUnix) HandleMessage() *tetragon.GetEventsResponse {
 
 	if option.Config.EnableProcessAncestors {
 		for _, ancestor := range ancestors {
+			logger.GetLogger().Warn("DEBUG_REFCNT: MsgCloneEventUnix.HandleMessage inc ancestor", "pid", proc.UnsafeGetProcess().Pid.GetValue(), "ancestor_pid", ancestor.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg), "ancestor_ptr", fmt.Sprintf("%p", ancestor))
 			ancestor.RefInc("ancestor")
 		}
 	}
@@ -409,10 +444,23 @@ func GetProcessExit(event *MsgExitEventUnix) *tetragon.ProcessExit {
 	var tetragonAncestors []*tetragon.Process
 	var ancestors []*process.ProcessInternal
 
+	logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit start",
+		"pid", event.ProcessKey.Pid,
+		"ktime", event.ProcessKey.Ktime,
+		"refCntDone", event.RefCntDone,
+		"msg_ptr", fmt.Sprintf("%p", event))
+
 	proc, parent := process.GetParentProcessInternal(event.ProcessKey.Pid, event.ProcessKey.Ktime)
+
+	logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit resolved",
+		"proc_ptr", fmt.Sprintf("%p", proc),
+		"parent_ptr", fmt.Sprintf("%p", parent))
 	if proc != nil {
 		tetragonProcess = proc.UnsafeGetProcess()
 	} else {
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit process not found (Exit before Exec?)",
+			"pid", event.ProcessKey.Pid,
+			"ktime", event.ProcessKey.Ktime)
 		tetragonProcess = &tetragon.Process{
 			Pid:       &wrapperspb.UInt32Value{Value: event.ProcessKey.Pid},
 			StartTime: ktime.ToProto(event.ProcessKey.Ktime),
@@ -485,23 +533,42 @@ func GetProcessExit(event *MsgExitEventUnix) *tetragon.ProcessExit {
 		return nil
 	}
 
+	parentPid := uint32(0)
+	if parent != nil {
+		parentPid = parent.UnsafeGetProcess().Pid.GetValue()
+	}
+
 	if ec := eventcache.Get(); ec != nil &&
 		(ec.Needed(tetragonProcess) ||
 			(tetragonProcess.Pid.Value > 1 && ec.Needed(tetragonParent)) ||
 			(option.Config.EnableProcessAncestors && ec.NeededAncestors(parent, ancestors))) {
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit cache_add",
+			"pid", event.ProcessKey.Pid,
+			"parent_pid", parentPid,
+			"refCntDone", event.RefCntDone,
+			"msg_ptr", fmt.Sprintf("%p", event))
 		ec.Add(nil, tetragonEvent, event.Common.Ktime, event.ProcessKey.Ktime, event)
 		return nil
 	}
 
+	logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit no_cache_do_dec",
+		"pid", event.ProcessKey.Pid,
+		"parent_pid", parentPid,
+		"refCntDone", event.RefCntDone,
+		"msg_ptr", fmt.Sprintf("%p", event))
+
 	if option.Config.EnableProcessAncestors {
 		for _, ancestor := range ancestors {
+			logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit dec ancestor", "pid", event.ProcessKey.Pid, "ancestor_pid", ancestor.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", event))
 			ancestor.RefDec("ancestor")
 		}
 	}
 	if parent != nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit dec parent", "pid", event.ProcessKey.Pid, "parent_pid", parent.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", event))
 		parent.RefDec("parent")
 	}
 	if proc != nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit dec process", "pid", event.ProcessKey.Pid, "msg_ptr", fmt.Sprintf("%p", event))
 		proc.RefDec("process")
 	}
 	return tetragonEvent
@@ -520,11 +587,20 @@ func (msg *MsgExitEventUnix) RetryInternal(ev notify.Event, timestamp uint64) (*
 	proc, parent := process.GetParentProcessInternal(msg.ProcessKey.Pid, timestamp)
 	var err error
 
+	logger.GetLogger().Warn("DEBUG_REFCNT: MsgExitEventUnix.RetryInternal start",
+		"pid", msg.ProcessKey.Pid,
+		"ktime", timestamp,
+		"refCntDone", msg.RefCntDone,
+		"parent_ptr", fmt.Sprintf("%p", parent),
+		"proc_ptr", fmt.Sprintf("%p", proc),
+		"msg_ptr", fmt.Sprintf("%p", msg))
+
 	if option.Config.EnableProcessAncestors && proc.NeededAncestors() && !msg.RefCntDone[AncestorsRefCnt] {
 		if ancestors, perr := process.GetAncestorProcessesInternal(proc.UnsafeGetProcess().ParentExecId); perr == nil {
 			var tetragonAncestors []*tetragon.Process
 			for _, ancestor := range ancestors {
 				tetragonAncestors = append(tetragonAncestors, ancestor.UnsafeGetProcess())
+				logger.GetLogger().Warn("DEBUG_REFCNT: MsgExitEventUnix.RetryInternal dec ancestor", "pid", msg.ProcessKey.Pid, "ancestor_pid", ancestor.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg))
 				ancestor.RefDec("ancestor")
 			}
 			ev.SetAncestors(tetragonAncestors)
@@ -538,6 +614,7 @@ func (msg *MsgExitEventUnix) RetryInternal(ev notify.Event, timestamp uint64) (*
 	if parent != nil {
 		ev.SetParent(parent.UnsafeGetProcess())
 		if !msg.RefCntDone[ParentRefCnt] {
+			logger.GetLogger().Warn("DEBUG_REFCNT: MsgExitEventUnix.RetryInternal dec parent", "pid", msg.ProcessKey.Pid, "parent_pid", parent.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg))
 			parent.RefDec("parent")
 			msg.RefCntDone[ParentRefCnt] = true
 		}
@@ -550,6 +627,7 @@ func (msg *MsgExitEventUnix) RetryInternal(ev notify.Event, timestamp uint64) (*
 		// Use cached version of the process
 		ev.SetProcess(proc.UnsafeGetProcess())
 		if !msg.RefCntDone[ProcessRefCnt] {
+			logger.GetLogger().Warn("DEBUG_REFCNT: MsgExitEventUnix.RetryInternal dec process", "pid", msg.ProcessKey.Pid, "msg_ptr", fmt.Sprintf("%p", msg))
 			proc.RefDec("process")
 			msg.RefCntDone[ProcessRefCnt] = true
 		}
@@ -559,6 +637,10 @@ func (msg *MsgExitEventUnix) RetryInternal(ev notify.Event, timestamp uint64) (*
 	}
 
 	if err == nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgExitEventUnix.RetryInternal done",
+			"pid", msg.ProcessKey.Pid,
+			"refCntDone", msg.RefCntDone,
+			"msg_ptr", fmt.Sprintf("%p", msg))
 		return proc, err
 	}
 	return nil, err
@@ -571,6 +653,11 @@ func (msg *MsgExitEventUnix) Retry(internal *process.ProcessInternal, ev notify.
 func (msg *MsgExitEventUnix) HandleMessage() *tetragon.GetEventsResponse {
 	var res *tetragon.GetEventsResponse
 
+	logger.GetLogger().Warn("DEBUG_REFCNT: MsgExitEventUnix.HandleMessage start", "pid", msg.ProcessKey.Pid, "refCntDone", msg.RefCntDone, "msg_ptr", fmt.Sprintf("%p", msg))
+
+	if msg.RefCntDone[0] || msg.RefCntDone[1] || msg.RefCntDone[2] {
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgExitEventUnix.HandleMessage resetting RefCntDone=true (potential double dec)", "pid", msg.ProcessKey.Pid, "refCntDone", msg.RefCntDone)
+	}
 	msg.RefCntDone = [3]bool{false, false, false}
 	e := GetProcessExit(msg)
 	if e != nil {
@@ -604,6 +691,7 @@ func (msg *MsgProcessCleanupEventUnix) RetryInternal(_ notify.Event, timestamp u
 	if option.Config.EnableProcessAncestors && proc.NeededAncestors() && !msg.RefCntDone[AncestorsRefCnt] {
 		if ancestors, perr := process.GetAncestorProcessesInternal(proc.UnsafeGetProcess().ParentExecId); perr == nil {
 			for _, ancestor := range ancestors {
+				logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.RetryInternal dec ancestor", "pid", msg.PID, "ancestor_pid", ancestor.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg))
 				ancestor.RefDec("ancestor")
 			}
 			msg.RefCntDone[AncestorsRefCnt] = true
@@ -615,6 +703,7 @@ func (msg *MsgProcessCleanupEventUnix) RetryInternal(_ notify.Event, timestamp u
 
 	if parent != nil {
 		if !msg.RefCntDone[ParentRefCnt] {
+			logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.RetryInternal dec parent", "pid", msg.PID, "parent_pid", parent.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg))
 			parent.RefDec("parent")
 			msg.RefCntDone[ParentRefCnt] = true
 		}
@@ -625,6 +714,7 @@ func (msg *MsgProcessCleanupEventUnix) RetryInternal(_ notify.Event, timestamp u
 
 	if proc != nil {
 		if !msg.RefCntDone[ProcessRefCnt] {
+			logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.RetryInternal dec process", "pid", msg.PID, "msg_ptr", fmt.Sprintf("%p", msg))
 			proc.RefDec("process")
 			msg.RefCntDone[ProcessRefCnt] = true
 		}
@@ -646,8 +736,18 @@ func (msg *MsgProcessCleanupEventUnix) Retry(_ *process.ProcessInternal, _ notif
 func (msg *MsgProcessCleanupEventUnix) HandleMessage() *tetragon.GetEventsResponse {
 	var ancestors []*process.ProcessInternal
 
+	logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.HandleMessage start",
+		"pid", msg.PID,
+		"refCntDone", msg.RefCntDone,
+		"msg_ptr", fmt.Sprintf("%p", msg))
+
 	msg.RefCntDone = [3]bool{false, false, false}
 	proc, parent := process.GetParentProcessInternal(msg.PID, msg.Ktime)
+	if proc == nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.HandleMessage process not found (Cleanup before Exec?)",
+			"pid", msg.PID,
+			"ktime", msg.Ktime)
+	}
 	if option.Config.EnableProcessAncestors && proc.NeededAncestors() {
 		ancestors, _ = process.GetAncestorProcessesInternal(proc.UnsafeGetProcess().ParentExecId)
 	}
@@ -657,18 +757,22 @@ func (msg *MsgProcessCleanupEventUnix) HandleMessage() *tetragon.GetEventsRespon
 			parent == nil ||
 			option.Config.EnableProcessAncestors && ec.NeededAncestors(parent, ancestors)) {
 		ec.Add(nil, nil, msg.Ktime, msg.Ktime, msg)
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.HandleMessage added to event cache", "pid", msg.PID, "msg_ptr", fmt.Sprintf("%p", msg))
 		return nil
 	}
 
 	if option.Config.EnableProcessAncestors {
 		for _, ancestor := range ancestors {
+			logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.HandleMessage dec ancestor", "pid", msg.PID, "ancestor_pid", ancestor.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg))
 			ancestor.RefDec("ancestor")
 		}
 	}
 	if parent != nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.HandleMessage dec parent", "pid", msg.PID, "parent_pid", parent.UnsafeGetProcess().Pid.GetValue(), "msg_ptr", fmt.Sprintf("%p", msg))
 		parent.RefDec("parent")
 	}
 	if proc != nil {
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgProcessCleanupEventUnix.HandleMessage dec process", "pid", msg.PID, "msg_ptr", fmt.Sprintf("%p", msg))
 		proc.RefDec("process")
 	}
 	return nil
