@@ -6,6 +6,7 @@ package process
 import (
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"time"
@@ -19,14 +20,17 @@ import (
 	"github.com/cilium/tetragon/pkg/defaults"
 	"github.com/cilium/tetragon/pkg/logger"
 	"github.com/cilium/tetragon/pkg/logger/logfields"
+	"github.com/cilium/tetragon/pkg/option"
+	"github.com/cilium/tetragon/pkg/reader/proc"
 	"github.com/cilium/tetragon/pkg/sensors/exec/execvemap"
 )
 
 type Cache struct {
-	cache      *lru.Cache[string, *ProcessInternal]
-	size       int
-	deleteChan chan *ProcessInternal
-	stopChan   chan bool
+	cache             *lru.Cache[string, *ProcessInternal]
+	size              int
+	deleteChan        chan *ProcessInternal
+	stopChan          chan bool
+	zombieScanRunning atomic.Bool
 }
 
 // garbage collection states
@@ -114,6 +118,74 @@ func (pc *Cache) cacheGarbageCollector(intervalGC time.Duration) {
 	}()
 }
 
+func (pc *Cache) handleZombies() {
+	pc.zombieScanRunning.Store(true)
+	defer pc.zombieScanRunning.Store(false)
+
+	// Snapshot values to avoid holding lock during iteration
+	entries := pc.cache.Values()
+	for _, p := range entries {
+		// Only check processes that are "inUse". If they are already in deleteQueue (pending/ready), skip.
+		if p.color != inUse {
+			continue
+		}
+
+		// Optimization: Don't check very recent processes.
+		// StartTime is a proto Timestamp.
+		if p.process.StartTime == nil {
+			continue
+		}
+		start := p.process.StartTime.AsTime()
+		if time.Since(start) < 60*time.Second {
+			continue
+		}
+
+		if !pc.isProcessAlive(p) {
+			// Process is dead/zombie. Check if we need to decrement "process".
+			p.refcntOpsLock.Lock()
+			plus := p.refcntOps["process++"]
+			minus := p.refcntOps["process--"]
+			p.refcntOpsLock.Unlock()
+
+			// If process++ > process--, it means we missed the exit event.
+			if plus > minus {
+				// This simulates the missing Exit event
+				pc.refDec(p, "process--")
+				logger.GetLogger().Debug("ZOMBIE REAPER: cleaning up process",
+					"exec_id", p.process.ExecId,
+					"pid", p.process.Pid.GetValue())
+			}
+		}
+	}
+}
+
+func (pc *Cache) isProcessAlive(p *ProcessInternal) bool {
+	pid := p.process.Pid.GetValue()
+	procfs := option.Config.ProcFS
+
+	// 1. Check if /proc/pid exists
+	statFile := filepath.Join(procfs, fmt.Sprint(pid))
+	_, err := os.Stat(statFile)
+	if os.IsNotExist(err) {
+		return false
+	}
+
+	// 2. Check ktime/ExecId to handle PID reuse
+	procStat, err := proc.GetProcStatStrings(statFile)
+	if err != nil {
+		// If we can't read stat, assume dead or inaccessible
+		return false
+	}
+
+	startTime, err := proc.GetStatsKtime(procStat)
+	if err != nil {
+		return false
+	}
+
+	currentExecId := GetProcessID(pid, startTime)
+	return currentExecId == p.process.ExecId
+}
+
 func (pc *Cache) deletePending(process *ProcessInternal) {
 	pc.deleteChan <- process
 }
@@ -122,7 +194,7 @@ func (pc *Cache) refDec(p *ProcessInternal, reason string) {
 	p.refcntOpsLock.Lock()
 	// count number of times refcnt is decremented for a specific reason (i.e. process, parent, etc.)
 	p.refcntOps[reason]++
-	opsCopy := maps.Clone(p.refcntOps)
+	// opsCopy := maps.Clone(p.refcntOps)
 	p.refcntOpsLock.Unlock()
 	ref := p.refcnt.Add(^uint32(0))
 
@@ -139,7 +211,7 @@ func (pc *Cache) refDec(p *ProcessInternal, reason string) {
 		"parent_exec_id", p.process.ParentExecId,
 		"reason", reason,
 		"new_refcnt", ref,
-		"refcnt_ops", opsCopy,
+		// "refcnt_ops", opsCopy,
 		"proc_ptr", fmt.Sprintf("%p", p),
 		"stack", string(debug.Stack()),
 	)

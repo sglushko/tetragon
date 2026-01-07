@@ -217,6 +217,8 @@ func tetragonExecuteCtx(ctx context.Context, cancel context.CancelFunc, ready fu
 		logger.Fatal(log, "Failed to setup logging", logfields.Error, err)
 	}
 
+	log.Info("DEBUG_STARTUP: custom Tetragon build is running", "version", version.Version)
+
 	if !filepath.IsAbs(option.Config.TracingPolicyDir) {
 		logger.Fatal(log, fmt.Sprintf("Failed path specified by --tracing-policy-dir '%q' is not absolute", option.Config.TracingPolicyDir))
 	}

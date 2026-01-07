@@ -60,7 +60,7 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 
 	proc := process.AddExecEvent(event.Unix)
 	tetragonProcess := proc.UnsafeGetProcess()
-	tetragonProcessCopy := proc.GetProcessCopy()
+	// tetragonProcessCopy := proc.GetProcessCopy()
 
 	parentId := tetragonProcess.ParentExecId
 	processId := tetragonProcess.ExecId
@@ -77,7 +77,7 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 		"process_id", processId,
 		"parent", tetragonParent,
 		"proc", proc,
-		"tetragonParentExecId", tetragonProcessCopy.GetParentExecId(),
+		// "tetragonParentExecId", tetragonProcessCopy.GetParentExecId(),
 	)
 
 	// Set the ancestors only if --enable-ancestors flag includes 'base'.
@@ -570,6 +570,11 @@ func GetProcessExit(event *MsgExitEventUnix) *tetragon.ProcessExit {
 	if proc != nil {
 		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit dec process", "pid", event.ProcessKey.Pid, "msg_ptr", fmt.Sprintf("%p", event))
 		proc.RefDec("process")
+	} else {
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetProcessExit skipping dec process (process not found)", 
+			"pid", event.ProcessKey.Pid, 
+			"parent_pid", parentPid,
+			"msg_ptr", fmt.Sprintf("%p", event))
 	}
 	return tetragonEvent
 }
@@ -632,6 +637,11 @@ func (msg *MsgExitEventUnix) RetryInternal(ev notify.Event, timestamp uint64) (*
 			msg.RefCntDone[ProcessRefCnt] = true
 		}
 	} else {
+		logger.GetLogger().Warn("DEBUG_REFCNT: MsgExitEventUnix.RetryInternal skipping dec process (process not found)",
+			"pid", msg.ProcessKey.Pid,
+			"parent_ptr", fmt.Sprintf("%p", parent),
+			"proc_ptr", fmt.Sprintf("%p", proc),
+			"msg_ptr", fmt.Sprintf("%p", msg))
 		eventcache.CacheRetries(eventcache.ProcessInfo).Inc()
 		err = eventcache.ErrFailedToGetProcessInfo
 	}

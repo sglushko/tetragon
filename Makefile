@@ -65,11 +65,11 @@ endif
 GO_BUILD_LDFLAGS =
 GO_BUILD_LDFLAGS += -X 'github.com/cilium/tetragon/pkg/version.Version=$(VERSION)'
 ifeq ($(NOSTRIP),)
-    # Note: these options will not remove annotations needed for stack
-    # traces, so panic backtraces will still be readable.
-    # -w: Omit the DWARF symbol table.
-    # -s: Omit the symbol table and debug information.
-    GO_BUILD_LDFLAGS += -s -w
+	# Note: these options will not remove annotations needed for stack
+	# traces, so panic backtraces will still be readable.
+	# -w: Omit the DWARF symbol table.
+	# -s: Omit the symbol table and debug information.
+	GO_BUILD_LDFLAGS += -s -w
 endif
 ifdef EXTRA_GO_BUILD_LDFLAGS
 	GO_BUILD_LDFLAGS += $(EXTRA_GO_BUILD_LDFLAGS)
@@ -80,7 +80,7 @@ GO_BUILD_FLAGS =
 GO_BUILD_FLAGS += -ldflags "$(GO_BUILD_LDFLAGS)"
 ifeq ($(NOOPT),1)
 	GO_BUILD_GCFLAGS = "all=-N -l"
-    GO_BUILD_FLAGS += -gcflags=$(GO_BUILD_GCFLAGS)
+	GO_BUILD_FLAGS += -gcflags=$(GO_BUILD_GCFLAGS)
 endif
 GO_BUILD_FLAGS += -mod=vendor
 ifdef EXTRA_GO_BUILD_FLAGS
@@ -258,6 +258,10 @@ copy-golangci-lint:
 .PHONY: test
 test: tester-progs tetragon-bpf ## Run Go tests.
 	$(GO) test -exec "$(SUDO)" -p 1 -parallel 1 $(GOFLAGS) -gcflags=$(GO_BUILD_GCFLAGS) -timeout $(GO_TEST_TIMEOUT) -failfast -cover ./pkg/... ./cmd/... ./operator/... ${EXTRA_TESTFLAGS}
+
+.PHONY: test-policyconf
+test-policyconf: tester-progs tetragon-bpf ## Run tests for the policyconf test package only.
+	$(GO) test -exec "$(SUDO)" -p 1 -parallel 1 $(GOFLAGS) -gcflags=$(GO_BUILD_GCFLAGS) -timeout $(GO_TEST_TIMEOUT) -failfast -cover ./pkg/policyconf/test ${EXTRA_TESTFLAGS}
 
 .PHONY: tester-progs
 tester-progs: ## Compile helper programs for unit testing.

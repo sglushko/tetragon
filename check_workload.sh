@@ -109,7 +109,7 @@ while true; do
     fi
     rm -f "$fast_out" "$fast_rc"
 
-    if (( match_found == 0 )); then
+    if (( 0 && match_found == 0 )); then
       echo "[$c] OK" >&2
       continue
     fi
@@ -136,7 +136,7 @@ while true; do
       offenders_count=0
     fi
 
-    if (( offenders_count > 0 )); then
+    if (( 1 || offenders_count > 0 )); then
       local_time=$(date)
       ts=$(date +'%Y%m%d_%H%M%S')
       found_dump="${HOST_OUT_DIR}/FOUND_${ts}_${c}_${offenders_count}.json"

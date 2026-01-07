@@ -442,7 +442,7 @@ func initProcessInternalClone(event *tetragonAPI.MsgCloneEvent,
 	pi := parent.cloneInternalProcessCopy()
 	if pi.process == nil {
 		err := errors.New("failed to clone parent process from cache")
-		logger.GetLogger().Debug("CloneEvent: parent process information is missing",
+		logger.GetLogger().Warn("DEBUG_REFCNT: CloneEvent: parent process information is missing",
 			logfields.Error, err,
 			"event.name", "Clone",
 			"event.parent.pid", event.Parent.Pid,
@@ -504,7 +504,7 @@ func GetParentProcessInternal(pid uint32, ktime uint64) (*ProcessInternal, *Proc
 	processID := GetProcessID(pid, ktime)
 
 	if process, err = procCache.get(processID); err != nil {
-		logger.GetLogger().Debug("process not found in cache",
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetParentProcessInternal process not found in cache",
 			"id in event", processID,
 			"pid", pid,
 			"ktime", ktime)
@@ -512,8 +512,9 @@ func GetParentProcessInternal(pid uint32, ktime uint64) (*ProcessInternal, *Proc
 	}
 
 	if parent, err = procCache.get(process.process.ParentExecId); err != nil {
-		logger.GetLogger().Debug("parent process not found in cache",
+		logger.GetLogger().Warn("DEBUG_REFCNT: GetParentProcessInternal parent process not found in cache",
 			"id in event", processID,
+			"parent_id", process.process.ParentExecId,
 			"pid", pid,
 			"ktime", ktime)
 		return process, nil
@@ -549,29 +550,37 @@ func GetAncestorProcessesInternal(execId string) ([]*ProcessInternal, error) {
 // AddExecEvent constructs a new ProcessInternal structure from an Execve event, adds it to the cache, and also returns it
 func AddExecEvent(event *tetragonAPI.MsgExecveEventUnix) *ProcessInternal {
 	var proc *ProcessInternal
-	
-	if event.Msg.CleanupProcess.Ktime == 0 || event.Process.Flags&api.EventClone != 0 {
-		logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent using Parent from Msg", "pid", event.Process.PID)
+
+	if event.Msg.CleanupProcess.Ktime == 0 ||
+		event.Process.Flags&api.EventClone != 0 {
+		// event.Process.PID != event.Msg.CleanupProcess.Pid {
+		logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent using Parent from Msg", "pid", event.Process.PID, "cleanup_pid", event.Msg.CleanupProcess.Pid)
+		if event.Msg.CleanupProcess.Ktime != 0 && event.Process.Flags&api.EventClone == 0 && event.Msg.CleanupProcess.Pid != event.Process.PID {
+			logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent CleanupProcess.Ktime != 0 && EventClone == 0 && CleanupProcess.Pid != PID", "pid", event.Process.PID, "cleanup_pid", event.Msg.CleanupProcess.Pid)
+		}
 		// there is a case where we cannot find this entry in execve_map
 		// in that case we use as parent what Linux knows
 		proc = initProcessInternalExec(event, event.Msg.Parent)
 	} else {
 		logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent using CleanupProcess as Parent", "pid", event.Process.PID, "cleanup_pid", event.Msg.CleanupProcess.Pid)
+		if event.Msg.CleanupProcess.Pid != event.Process.PID {
+			logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent CleanupProcess.Pid != PID", "pid", event.Process.PID, "cleanup_pid", event.Msg.CleanupProcess.Pid)
+		}
 		proc = initProcessInternalExec(event, event.Msg.CleanupProcess)
 	}
 
-	// Check if we are overwriting an existing process
-	if oldProc, err := procCache.get(proc.process.ExecId); err == nil {
-		oldRef := oldProc.refcnt.Load()
-		if oldRef > 1 {
-			logger.GetLogger().Warn("AddExecEvent: overwriting process with active references",
-				"exec_id", proc.process.ExecId,
-				"old_refcnt", oldRef,
-				"new_refcnt", proc.refcnt.Load(),
-				"old_ops", oldProc.refcntOps,
-			)
-		}
-	}
+	// // Check if we are overwriting an existing process
+	// if oldProc, err := procCache.get(proc.process.ExecId); err == nil {
+	// 	oldRef := oldProc.refcnt.Load()
+	// 	if oldRef > 1 {
+	// 		logger.GetLogger().Warn("AddExecEvent: overwriting process with active references",
+	// 			"exec_id", proc.process.ExecId,
+	// 			"old_refcnt", oldRef,
+	// 			"new_refcnt", proc.refcnt.Load(),
+	// 			"old_ops", oldProc.refcntOps,
+	// 		)
+	// 	}
+	// }
 
 	procCache.add(proc)
 	logger.GetLogger().Warn("DEBUG_REFCNT: AddExecEvent added",
@@ -587,7 +596,7 @@ func AddCloneEvent(event *tetragonAPI.MsgCloneEvent) (*ProcessInternal, error) {
 	parentExecId := GetProcessID(event.Parent.Pid, event.Parent.Ktime)
 	parent, err := Get(parentExecId)
 	if err != nil {
-		logger.GetLogger().Debug("CloneEvent: parent process not found in cache",
+		logger.GetLogger().Warn("DEBUG_REFCNT: CloneEvent: parent process not found in cache",
 			logfields.Error, err,
 			"event.name", "Clone",
 			"event.parent.pid", event.Parent.Pid,

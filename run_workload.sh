@@ -22,7 +22,7 @@ MEMORY_LIMIT_BYTES=${MEMORY_LIMIT_BYTES:-$((20 * 1024 * 1024 * 1024))}
 
 # Optional throttle based on free memory reported by `free -b` (field 4).
 # Example: FREE_MEM_MIN_BYTES=1GiB
-FREE_MEM_MIN_BYTES=${FREE_MEM_MIN_BYTES:-$((4 * 1024 * 1024 * 1024))}
+FREE_MEM_MIN_BYTES=${FREE_MEM_MIN_BYTES:-$((0 * 1024 * 1024 * 1024))}
 
 count=0
 last_print=$SECONDS
