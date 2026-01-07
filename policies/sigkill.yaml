@@ -1,0 +1,20 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: tp-sigkill
+  # namespace: namespace
+spec:
+  kprobes:
+  - call: "sys_getcpu"
+    syscall: true
+    return: true
+    args:
+    - index: 0
+      type: "int"
+    returnArg:
+      index: 0
+      type: "int"
+    selectors:
+    - matchActions:
+      - action: Signal
+        argSig: 9

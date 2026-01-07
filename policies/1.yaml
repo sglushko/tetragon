@@ -1,0 +1,23 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "linux-add-user-account-detection"
+  annotations:
+    author: "Isovalent now part of Cisco"
+spec:
+  kprobes:
+  - call: "security_bprm_check"
+    message: "User account creation detected by Policy"
+    syscall: false
+    return: false
+    tags: ["attack.T1136.001", "attack.persistence"]
+    args:
+    - index: 0
+      type: "linux_binprm"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "Postfix"
+        values:
+        - "useradd"
+        - "adduser"
