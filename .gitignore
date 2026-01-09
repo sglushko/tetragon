@@ -33,3 +33,10 @@ cscope.in.out
 
 # macOS artifacts
 .DS_Store
+
+# Reproduction artifacts
+processcache_dumps*/
+*.json
+!events.json
+!testdata/events.json
+!cache.json
