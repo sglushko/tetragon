@@ -142,6 +142,9 @@ type config struct {
 
 	KeepCollection bool
 
+	SyntheticEventsSource          string
+	SyntheticEventsLog             string
+	SyntheticEventsVerifyRoundtrip bool
 }
 
 var (
