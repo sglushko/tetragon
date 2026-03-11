@@ -65,9 +65,12 @@ type config struct {
 	RBSizeTotal       int
 	RBQueueSize       int
 
-	ProcessCacheSize       int
-	DataCacheSize          int
-	ProcessCacheGCInterval time.Duration
+	ProcessCacheSize                   int
+	DataCacheSize                      int
+	ProcessCacheGCInterval             time.Duration
+	ProcessCacheStaleInterval          time.Duration
+	ProcessCacheStaleThreshold         time.Duration
+	ProcessCacheStaleBackoffMultiplier float64
 
 	MetricsServer      string
 	MetricsLabelFilter metrics.LabelFilter
@@ -138,6 +141,7 @@ type config struct {
 	RetprobesCacheSize int
 
 	KeepCollection bool
+
 }
 
 var (

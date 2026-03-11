@@ -13,13 +13,13 @@ import (
 )
 
 // GetProcessCacheForDump retrieves the internal process cache from the Tetragon agent
-// via gRPC, applying optional filters for zero-refcount entries and execve map processes.
-func GetProcessCacheForDump(ctx context.Context, client tetragon.FineGuidanceSensorsClient, maxCallRecvMsgSize int, skipZeroRefcnt bool, excludeExecveMapProcesses bool) ([]*tetragon.ProcessInternal, error) {
+// via gRPC, applying optional filters for removable entries and execve map processes.
+func GetProcessCacheForDump(ctx context.Context, client tetragon.FineGuidanceSensorsClient, maxCallRecvMsgSize int, skipRemovable bool, excludeExecveMapProcesses bool) ([]*tetragon.ProcessInternal, error) {
 	req := tetragon.GetDebugRequest{
 		Flag: tetragon.ConfigFlag_CONFIG_FLAG_DUMP_PROCESS_CACHE,
 		Arg: &tetragon.GetDebugRequest_Dump{
 			Dump: &tetragon.DumpProcessCacheReqArgs{
-				SkipZeroRefcnt:            skipZeroRefcnt,
+				SkipRemovable:             skipRemovable,
 				ExcludeExecveMapProcesses: excludeExecveMapProcesses,
 			},
 		},

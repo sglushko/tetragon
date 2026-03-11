@@ -450,9 +450,15 @@ func tetragonExecuteCtx(ctx context.Context, cancel context.CancelFunc, ready fu
 		pcGCInterval = defaults.DefaultProcessCacheGCInterval
 	}
 
-	if err := process.InitCache(podAccessor, option.Config.ProcessCacheSize, pcGCInterval); err != nil {
+	if err := process.InitCache(podAccessor, option.Config.ProcessCacheSize,
+		pcGCInterval,
+		option.Config.ProcessCacheStaleInterval,
+		option.Config.ProcessCacheStaleThreshold,
+		option.Config.ProcessCacheStaleBackoffMultiplier,
+	); err != nil {
 		return err
 	}
+	defer process.FreeCache()
 
 	// cleanupWg is needed to ensure that gRPC code cleanly finishes before we exit (e.g,
 	// due to a signal). This is needed, for example, so that the exported writes full

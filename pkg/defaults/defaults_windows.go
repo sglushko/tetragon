@@ -51,7 +51,10 @@ const (
 	DefaultEventCacheRetryDelay = 2
 
 	// defaults for the process cache
-	DefaultProcessCacheGCInterval = 30 * time.Second
+	DefaultProcessCacheGCInterval             = 30 * time.Second
+	DefaultProcessCacheStaleInterval          = 60 * time.Minute
+	DefaultProcessCacheStaleThreshold         = 60 * time.Minute
+	DefaultProcessCacheStaleBackoffMultiplier = 2.0
 
 	// defaults for the {k,u}retprobes lru cache
 	DefaultRetprobesCacheSize = 4096

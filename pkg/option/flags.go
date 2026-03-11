@@ -23,19 +23,22 @@ import (
 )
 
 const (
-	KeyConfigDir              = "config-dir"
-	KeyDebug                  = "debug"
-	KeyHubbleLib              = "bpf-lib"
-	KeyBTF                    = "btf"
-	KeyProcFS                 = "procfs"
-	KeyKernelVersion          = "kernel"
-	KeyVerbosity              = "verbose"
-	KeyProcessCacheSize       = "process-cache-size"
-	KeyDataCacheSize          = "data-cache-size"
-	KeyProcessCacheGCInterval = "process-cache-gc-interval"
-	KeyForceSmallProgs        = "force-small-progs"
-	KeyForceLargeProgs        = "force-large-progs"
-	KeyClusterName            = "cluster-name"
+	KeyConfigDir                          = "config-dir"
+	KeyDebug                              = "debug"
+	KeyHubbleLib                          = "bpf-lib"
+	KeyBTF                                = "btf"
+	KeyProcFS                             = "procfs"
+	KeyKernelVersion                      = "kernel"
+	KeyVerbosity                          = "verbose"
+	KeyProcessCacheSize                   = "process-cache-size"
+	KeyDataCacheSize                      = "data-cache-size"
+	KeyProcessCacheGCInterval             = "process-cache-gc-interval"
+	KeyProcessCacheStaleInterval          = "process-cache-stale-interval"
+	KeyProcessCacheStaleThreshold         = "process-cache-stale-threshold"
+	KeyProcessCacheStaleBackoffMultiplier = "process-cache-stale-backoff-multiplier"
+	KeyForceSmallProgs                    = "force-small-progs"
+	KeyForceLargeProgs                    = "force-large-progs"
+	KeyClusterName                        = "cluster-name"
 
 	KeyLogLevel  = "log-level"
 	KeyLogFormat = "log-format"
@@ -141,6 +144,7 @@ const (
 	KeyParentsMapSize    = "parents-map-size"
 
 	KeyRetprobesCacheSize = "retprobes-cache-size"
+
 )
 
 type UsernameMetadaCode int
@@ -224,9 +228,24 @@ func ReadAndSetFlags() error {
 	Config.ProcessCacheSize = viper.GetInt(KeyProcessCacheSize)
 	Config.DataCacheSize = viper.GetInt(KeyDataCacheSize)
 	Config.ProcessCacheGCInterval = viper.GetDuration(KeyProcessCacheGCInterval)
+	Config.ProcessCacheStaleInterval = viper.GetDuration(KeyProcessCacheStaleInterval)
+	Config.ProcessCacheStaleThreshold = viper.GetDuration(KeyProcessCacheStaleThreshold)
+	Config.ProcessCacheStaleBackoffMultiplier = viper.GetFloat64(KeyProcessCacheStaleBackoffMultiplier)
 
 	if Config.ProcessCacheGCInterval <= 0 {
 		return errors.New("failed to parse process-cache-gc-interval value. Must be >= 0")
+	}
+
+	if Config.ProcessCacheStaleInterval <= 0 {
+		return errors.New("failed to parse process-cache-stale-interval value. Must be > 0")
+	}
+
+	if Config.ProcessCacheStaleThreshold <= 0 {
+		return errors.New("failed to parse process-cache-stale-threshold value. Must be > 0")
+	}
+
+	if Config.ProcessCacheStaleBackoffMultiplier <= 0 {
+		return errors.New("process-cache-stale-backoff-multiplier must be > 0")
 	}
 
 	Config.MetricsServer = viper.GetString(KeyMetricsServer)
@@ -309,6 +328,7 @@ func ReadAndSetFlags() error {
 	Config.ParentsMapSize = viper.GetString(KeyParentsMapSize)
 
 	Config.RetprobesCacheSize = viper.GetInt(KeyRetprobesCacheSize)
+
 	return nil
 }
 
@@ -386,6 +406,9 @@ func AddFlags(flags *pflag.FlagSet) {
 	flags.Int(KeyProcessCacheSize, 65536, "Size of the process cache")
 	flags.Int(KeyDataCacheSize, 1024, "Size of the data events cache")
 	flags.Duration(KeyProcessCacheGCInterval, defaults.DefaultProcessCacheGCInterval, "Time between checking the process cache for old entries")
+	flags.Duration(KeyProcessCacheStaleInterval, defaults.DefaultProcessCacheStaleInterval, "Interval between stale process cache scans")
+	flags.Duration(KeyProcessCacheStaleThreshold, defaults.DefaultProcessCacheStaleThreshold, "Time without events before a process is considered stale")
+	flags.Float64(KeyProcessCacheStaleBackoffMultiplier, defaults.DefaultProcessCacheStaleBackoffMultiplier, "Backoff multiplier for stale process cache checks")
 	flags.Bool(KeyForceSmallProgs, false, "Force loading small programs, even in kernels with >= 5.3 versions")
 	flags.Bool(KeyForceLargeProgs, false, "Force loading large programs, even in kernels with < 5.3 versions")
 	flags.String(KeyExportFilename, "", "Filename for JSON export. Disabled by default")
@@ -510,4 +533,5 @@ func AddFlags(flags *pflag.FlagSet) {
 	flags.String(KeyParentsMapSize, "", "Set size for parents_map table (allows K/M/G suffix)")
 
 	flags.Int(KeyRetprobesCacheSize, defaults.DefaultRetprobesCacheSize, "Set {k,u}retprobes events cache maximum size")
+
 }

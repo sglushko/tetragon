@@ -377,7 +377,12 @@ func loadExporter(tb testing.TB, ctx context.Context, obs *observer.Observer, op
 		procCacheGCInterval = oo.procCacheGCInterval
 	}
 
-	if err := process.InitCache(k8sWatcher, processCacheSize, procCacheGCInterval); err != nil {
+	if err := process.InitCache(k8sWatcher, processCacheSize,
+		procCacheGCInterval,
+		defaults.DefaultProcessCacheStaleInterval,
+		defaults.DefaultProcessCacheStaleThreshold,
+		defaults.DefaultProcessCacheStaleBackoffMultiplier,
+	); err != nil {
 		return err
 	}
 
