@@ -5,10 +5,10 @@ package process
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cilium/tetragon/pkg/constants"
@@ -50,8 +50,7 @@ type ProcessInternal struct {
 	// about the binary during the corresponding ProcessExec only.
 	apiBinaryProp *tetragon.BinaryProperties
 	// garbage collector metadata
-	color  int // Writes should happen only inside gc select channel
-	refcnt atomic.Uint32
+	color int // Writes should happen only inside gc select channel
 	// refcntOps is a map of operations to refcnt change
 	// keys can be:
 	// - "process++": process increased refcnt (i.e. this process starts)
@@ -61,6 +60,8 @@ type ProcessInternal struct {
 	refcntOps map[string]int32
 	// protects the refcntOps map
 	refcntOpsLock sync.Mutex
+	// lifecycle tracks process lifecycle state for safe cache removal.
+	lifecycle ProcessLifecycler
 }
 
 var (
@@ -72,7 +73,10 @@ var (
 	ErrProcessInfoMissing = errors.New("failed process info missing")
 )
 
-func InitCache(w watcher.PodAccessor, size int, GCInterval time.Duration) error {
+func InitCache(w watcher.PodAccessor, size int,
+	GCInterval, staleTickInterval, staleThreshold time.Duration,
+	staleBackoffMultiplier float64,
+) error {
 	var err error
 
 	if procCache != nil {
@@ -80,7 +84,7 @@ func InitCache(w watcher.PodAccessor, size int, GCInterval time.Duration) error 
 	}
 
 	k8s = w
-	procCache, err = NewCache(size, GCInterval)
+	procCache, err = NewCache(size, GCInterval, staleTickInterval, staleThreshold, staleBackoffMultiplier)
 	if err != nil {
 		k8s = nil
 	}
@@ -100,25 +104,25 @@ func (pi *ProcessInternal) GetProcessCopy() *tetragon.Process {
 	pi.mu.Lock()
 	proc := proto.Clone(pi.process).(*tetragon.Process)
 	pi.mu.Unlock()
-	proc.Refcnt = pi.refcnt.Load()
+	proc.Refcnt = pi.RefcntOpsSum()
 	return proc
 }
 
-// cloneInternalProcessCopy() duplicates ProcessInternal, sets its refcnt to 1
-// and returns it
+// cloneInternalProcessCopy duplicates ProcessInternal and returns it.
 func (pi *ProcessInternal) cloneInternalProcessCopy() *ProcessInternal {
 	pi.mu.Lock()
 	defer pi.mu.Unlock()
-	npi := &ProcessInternal{
+	proc := &ProcessInternal{
 		process:       proto.Clone(pi.process).(*tetragon.Process),
 		capabilities:  pi.capabilities,
 		apiCreds:      pi.apiCreds,
 		apiBinaryProp: pi.apiBinaryProp,
 		namespaces:    pi.namespaces,
-		refcntOps:     map[string]int32{"process++": 1},
+		refcntOps:     make(map[string]int32),
+		lifecycle:     NewLifecycle(),
 	}
-	npi.refcnt.Store(1) // Explicitly initialize refcnt to 1
-	return npi
+	proc.ProcessExec()
+	return proc
 }
 
 func (pi *ProcessInternal) AddPodInfo(pod *tetragon.Pod) {
@@ -138,6 +142,92 @@ func (pi *ProcessInternal) putProcess() {
 
 func (pi *ProcessInternal) UnsafeGetProcess() *tetragon.Process {
 	return pi.process
+}
+
+// Lifecycle returns the process lifecycle tracker.
+func (pi *ProcessInternal) Lifecycle() ProcessLifecycler {
+	return pi.lifecycle
+}
+
+// ProcessExec records that this process was exec'd.
+// Bundles: refInc("process++").
+// Called once during process construction (initProcessInternalExec, cloneInternalProcessCopy).
+func (pi *ProcessInternal) ProcessExec() {
+	procCache.refInc(pi, "process++")
+}
+
+// ProcessExit records that an exit/cleanup event was seen for this
+// process. On the first call (MarkExited CAS succeeds) it also tracks
+// refDec("process--"). On every call where exitSeen is true, it checks
+// CanRemove and schedules the process for GC if removable.
+//
+// Returns:
+//   - stateChanged: true if this was the first exit (MarkExited CAS succeeded).
+//   - removable: true when the process is removable (exited + no active children).
+//
+// Safe to call multiple times: RefDec happens exactly once (CAS-guarded),
+// deletePending is idempotent (GC handles duplicates).
+func (pi *ProcessInternal) ProcessExit() (stateChanged, removable bool) {
+	stateChanged = pi.lifecycle.MarkExited()
+	if stateChanged {
+		// RefDec is outside CanRemove intentionally: the exit happened and
+		// refcntOps must reflect it even when the process still has active
+		// children (CanRemove == false).  Without this, RefcntOpsSum() would
+		// never show "process--" for processes with children.
+		procCache.refDec(pi, "process--")
+	}
+	// exitSeen is now true (either just set above, or was already true).
+	// Always attempt deletion scheduling if removable — this allows a
+	// cleanup event to schedule GC even when the exit event already
+	// consumed the MarkExited CAS.
+	removable = pi.TryDeletePending()
+	return stateChanged, removable
+}
+
+// ChildExec records that a child process was exec'd.
+// Bundles: lifecycle.ChildExec(childExecId) + refInc("parent++") on success.
+// Called on the parent when a child is added to the cache.
+// Returns true if the child was new (state changed), false if duplicate.
+func (pi *ProcessInternal) ChildExec(childExecId string) bool {
+	if pi.lifecycle.ChildExec(childExecId) {
+		procCache.refInc(pi, "parent++")
+		return true
+	}
+	return false
+}
+
+// ChildExit records that a child process exited and schedules this
+// process for GC if it becomes removable.
+// Bundles: lifecycle.ChildExit(childExecId) + refDec("parent--") on success + TryDeletePending().
+// Called on the parent when a child exits or is evicted.
+// Idempotent: safe to call multiple times for the same childExecId.
+//
+// Returns:
+//   - stateChanged: true if the child was known and removed from the map (first call for this childExecId).
+//   - removable: true when the process is removable (exited + no active children).
+func (pi *ProcessInternal) ChildExit(childExecId string) (stateChanged, removable bool) {
+	stateChanged = pi.lifecycle.ChildExit(childExecId)
+	if stateChanged {
+		procCache.refDec(pi, "parent--")
+	}
+	removable = pi.TryDeletePending()
+	return stateChanged, removable
+}
+
+// TryDeletePending checks if the process is removable and, if so,
+// sends it to the GC delete queue. Returns true if deletion was scheduled.
+// Safe to call after any lifecycle mutation (ChildExit, MarkExited, etc.).
+func (pi *ProcessInternal) TryDeletePending() bool {
+	if !pi.lifecycle.CanRemove() {
+		return false
+	}
+	if pi.process != nil {
+		if parent, err := procCache.get(pi.process.ParentExecId); err == nil {
+			parent.ChildExit(pi.process.ExecId)
+		}
+	}
+	procCache.deletePending(pi)
+	return true
 }
 
 // UpdateExecOutsideCache() checks if we must augment the ProcessExec.Process
@@ -221,16 +311,41 @@ func (pi *ProcessInternal) AnnotateProcess(cred, ns bool) error {
 	return nil
 }
 
+// RefDec decrements the reference counter for the given reason.
+// Refcount is for observability/tracking only — lifecycle methods control GC.
+// Panics if reason is "parent" or "process" (must use lifecycle methods).
 func (pi *ProcessInternal) RefDec(reason string) {
+	if reason == "parent" || reason == "process" {
+		panic("RefDec: use lifecycle methods for " + reason)
+	}
 	procCache.refDec(pi, reason+"--")
 }
 
+// RefInc increments the reference counter for the given reason.
+// Refcount is for observability/tracking only — lifecycle methods control GC.
+// Panics if reason is "parent" or "process" (must use lifecycle methods).
 func (pi *ProcessInternal) RefInc(reason string) {
+	if reason == "parent" || reason == "process" {
+		panic("RefInc: use lifecycle methods for " + reason)
+	}
 	procCache.refInc(pi, reason+"++")
 }
 
-func (pi *ProcessInternal) RefGet() uint32 {
-	return pi.refcnt.Load()
+// RefcntOpsSum returns the net sum of refcntOps (increments minus decrements).
+// This is purely for observability, debugging, and populating proto Refcnt fields.
+// Do NOT use this value for any cache eviction or lifecycle logic.
+func (pi *ProcessInternal) RefcntOpsSum() uint32 {
+	pi.refcntOpsLock.Lock()
+	defer pi.refcntOpsLock.Unlock()
+	var sum int32
+	for k, v := range pi.refcntOps {
+		if strings.HasSuffix(k, "++") {
+			sum += v
+		} else {
+			sum -= v
+		}
+	}
+	return uint32(sum)
 }
 
 func (pi *ProcessInternal) NeededAncestors() bool {
@@ -412,7 +527,6 @@ func initProcessInternalExec(
 			ExecId:               execID,
 			Docker:               event.Kube.Docker,
 			ParentExecId:         parentExecID,
-			Refcnt:               0,
 			User:                 user,
 			EnvironmentVariables: getEnvironmentVariables(envs),
 		},
@@ -420,9 +534,10 @@ func initProcessInternalExec(
 		apiCreds:      apiCreds,
 		apiBinaryProp: apiBinaryProp,
 		namespaces:    apiNs,
-		refcntOps:     map[string]int32{"process++": 1},
+		refcntOps:     make(map[string]int32),
+		lifecycle:     NewLifecycle(),
 	}
-	pi.refcnt.Store(1)
+	pi.ProcessExec()
 
 	// Set in_init_tree flag
 	if event.Process.Flags&api.EventInInitTree == api.EventInInitTree {
@@ -471,7 +586,6 @@ func initProcessInternalClone(event *tetragonAPI.MsgCloneEvent,
 
 	pi.process.Flags = strings.Join(exec.DecodeCommonFlags(event.Flags), " ")
 	pi.process.StartTime = ktime.ToProto(event.Ktime)
-	pi.process.Refcnt = 1
 	if pi.process.Pod != nil && pi.process.Pod.Container != nil {
 		// Set the pid inside the container
 		pi.process.Pod.Container.Pid = &wrapperspb.UInt32Value{Value: event.NSPID}
@@ -556,7 +670,13 @@ func AddExecEvent(event *tetragonAPI.MsgExecveEventUnix) *ProcessInternal {
 		proc = initProcessInternalExec(event, event.Msg.CleanupProcess)
 	}
 
-	procCache.add(proc)
+	duplicate, _ := procCache.add(proc)
+	if duplicate {
+		// Return the existing entry from cache to avoid losing references.
+		if existing, err := procCache.get(proc.process.ExecId); err == nil {
+			return existing
+		}
+	}
 	return proc
 }
 
@@ -578,8 +698,12 @@ func AddCloneEvent(event *tetragonAPI.MsgCloneEvent) (*ProcessInternal, error) {
 		return nil, err
 	}
 
-	parent.RefInc("parent")
-	procCache.add(proc)
+	duplicate, _ := procCache.add(proc)
+	if duplicate {
+		return nil, fmt.Errorf("duplicate clone event for exec_id %s", proc.process.ExecId)
+	}
+	// ChildExec parent only AFTER successful add to avoid refcnt imbalance on duplicates.
+	parent.ChildExec(proc.process.ExecId)
 	return proc, nil
 }
 
