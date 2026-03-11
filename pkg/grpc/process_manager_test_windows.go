@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/tetragon/pkg/defaults"
 	"github.com/cilium/tetragon/pkg/process"
 	"github.com/cilium/tetragon/pkg/reader/node"
 	"github.com/cilium/tetragon/pkg/watcher"
@@ -21,7 +20,7 @@ func TestProcessManagerGetProcessID(t *testing.T) {
 	require.NoError(t, os.Setenv("NODE_NAME", "my-node"))
 	node.SetExportNodeName()
 
-	err := process.InitCache(watcher.NewFakeK8sWatcher([]any{}), 10, defaults.DefaultProcessCacheGCInterval)
+	err := process.InitCacheForTest(watcher.NewFakeK8sWatcher([]any{}), 10)
 	require.NoError(t, err)
 	defer process.FreeCache()
 	id := process.GetProcessID(1, 2)

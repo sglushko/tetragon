@@ -23,11 +23,38 @@ import (
 	"github.com/cilium/tetragon/pkg/reader/notify"
 )
 
-const (
-	ProcessRefCnt = iota
-	ParentRefCnt
-	AncestorsRefCnt
-)
+const AncestorsRefCnt = 2
+
+func logProcessFields(prefix string, proc *tetragon.Process) []any {
+	if proc == nil {
+		return []any{prefix + ".nil", true}
+	}
+	pid := proc.GetPid()
+	var pidValue uint32
+	if pid != nil {
+		pidValue = pid.GetValue()
+	}
+	tid := proc.GetTid()
+	var tidValue uint32
+	if tid != nil {
+		tidValue = tid.GetValue()
+	}
+	return []any{
+		prefix + ".exec_id", proc.ExecId,
+		prefix + ".pid", pidValue,
+		prefix + ".tid", tidValue,
+		prefix + ".parent_exec_id", proc.ParentExecId,
+		prefix + ".binary", proc.Binary,
+	}
+}
+
+func logProcessInternalFields(prefix string, proc *process.ProcessInternal) []any {
+	if proc == nil {
+		return []any{prefix + ".nil", true}
+	}
+	fields := logProcessFields(prefix, proc.UnsafeGetProcess())
+	return append(fields, prefix+".lifecycle", proc.Lifecycle().Snapshot())
+}
 
 func (msg *MsgExecveEventUnix) getCleanupEvent() *MsgProcessCleanupEventUnix {
 	if msg.Unix.Msg.CleanupProcess.Ktime == 0 {
@@ -47,6 +74,9 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 
 	proc := process.AddExecEvent(event.Unix)
 	tetragonProcess := proc.UnsafeGetProcess()
+	logger.Trace(logger.GetLogger(), "GetProcessExec add exec event",
+		append(logProcessInternalFields("process", proc),
+			"use_cache", useCache)...)
 
 	parentId := tetragonProcess.ParentExecId
 	processId := tetragonProcess.ExecId
@@ -54,6 +84,13 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 	parent, err := process.Get(parentId)
 	if err == nil {
 		tetragonParent = parent.UnsafeGetProcess()
+		logger.Trace(logger.GetLogger(), "GetProcessExec parent found",
+			append(logProcessInternalFields("parent", parent),
+				"parent.exec_id", parentId)...)
+	} else {
+		logger.Trace(logger.GetLogger(), "GetProcessExec parent missing",
+			"parent.exec_id", parentId,
+			"error", err)
 	}
 
 	// Set the ancestors only if --enable-ancestors flag includes 'base'.
@@ -67,6 +104,9 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 		for _, ancestor := range ancestors {
 			tetragonAncestors = append(tetragonAncestors, ancestor.UnsafeGetProcess())
 		}
+		logger.Trace(logger.GetLogger(), "GetProcessExec ancestors collected",
+			append(logProcessFields("process", tetragonProcess),
+				"ancestors.count", len(ancestors))...)
 	}
 
 	// Set the cap field only if --enable-process-cred flag is set.
@@ -83,7 +123,18 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 
 	if tetragonProcess.Pid == nil {
 		eventcache.CacheErrors(eventcache.NilProcessPid, notify.EventType(tetragonEvent)).Inc()
+		logger.Trace(logger.GetLogger(), "GetProcessExec missing pid",
+			append(logProcessFields("process", tetragonProcess),
+				"event_cache", useCache)...)
 		return nil
+	}
+
+	// Establish parent-child relationship before cache check.
+	// ChildExec is idempotent (map-based), so the Retry path calling it
+	// again is a no-op. Doing this early prevents the parent from being
+	// GC'd while the child event sits in cache waiting for pod info.
+	if parent != nil {
+		parent.ChildExec(proc.UnsafeGetProcess().ExecId)
 	}
 
 	if useCache {
@@ -101,9 +152,6 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 			ancestor.RefInc("ancestor")
 		}
 	}
-	if parent != nil {
-		parent.RefInc("parent")
-	}
 
 	// Finalize the process event with extra fields
 	if err := event.finalize(tetragonEvent, proc, eventcache.NO_EV_CACHE); err != nil {
@@ -118,12 +166,15 @@ func GetProcessExec(event *MsgExecveEventUnix, useCache bool) *tetragon.ProcessE
 		// For ProcessExec event we do not fail let's return what we have even if it's not complete
 		// The eventmetrics will count further errors
 	}
-
 	// do we need to cleanup anything?
-	if cleanupEvent := event.getCleanupEvent(); cleanupEvent != nil {
+	cleanupEvent := event.getCleanupEvent()
+	if cleanupEvent != nil {
+		logger.Trace(logger.GetLogger(), "GetProcessExec cleanup event",
+			append(logProcessInternalFields("process", proc),
+				"cleanup.pid", cleanupEvent.PID,
+				"cleanup.ktime", cleanupEvent.Ktime)...)
 		cleanupEvent.HandleMessage()
 	}
-
 	return tetragonEvent
 }
 
@@ -207,6 +258,10 @@ func (msg *MsgExecveEventUnix) Retry(internal *process.ProcessInternal, ev notif
 		podInfo = process.GetPodInfo(containerId, filename, args, nspid)
 		if podInfo == nil {
 			eventcache.CacheRetries(eventcache.PodInfo).Inc()
+			logger.Trace(logger.GetLogger(), "Execve Retry missing pod info",
+				append(logProcessInternalFields("process", internal),
+					"container_id", containerId,
+					"process.binary", filename)...)
 			return eventcache.ErrFailedToGetPodInfo
 		}
 	}
@@ -219,16 +274,24 @@ func (msg *MsgExecveEventUnix) Retry(internal *process.ProcessInternal, ev notif
 
 	// Check we have a parent with exception for pid 1, note we do this last because we want
 	// to ensure the podInfo and process are set before returning any errors.
-	if tetragonProcess.Pid.Value > 1 && !msg.RefCntDone[ParentRefCnt] {
+	// No RefCntDone guard needed: ChildExec is idempotent (map-based).
+	if tetragonProcess.Pid.Value > 1 {
 		parentId := tetragonProcess.ParentExecId
 		parent, err := process.Get(parentId)
 		if parent == nil {
 			eventcache.CacheRetries(eventcache.ParentInfo).Inc()
+			logger.Trace(logger.GetLogger(), "Execve Retry missing parent",
+				append(logProcessInternalFields("process", internal),
+					"parent.exec_id", parentId,
+					"error", err)...)
 			return err
 		}
-		parent.RefInc("parent")
+		parent.ChildExec(tetragonProcess.ExecId)
 		ev.SetParent(parent.UnsafeGetProcess())
-		msg.RefCntDone[ParentRefCnt] = true
+		logger.Trace(logger.GetLogger(), "Execve Retry parent refcnt++",
+			append(logProcessInternalFields("process", internal),
+				append(logProcessInternalFields("parent", parent),
+					"parent.lookup_exec_id", parentId)...)...)
 	}
 
 	// Check if we have ancestors with exception for pid 1 and pid 2. Note that we pass
@@ -246,8 +309,14 @@ func (msg *MsgExecveEventUnix) Retry(internal *process.ProcessInternal, ev notif
 			}
 			ev.SetAncestors(tetragonAncestors)
 			msg.RefCntDone[AncestorsRefCnt] = true
+			logger.Trace(logger.GetLogger(), "Execve Retry ancestors refcnt++",
+				append(logProcessInternalFields("process", internal),
+					"ancestors.count", len(ancestors))...)
 		} else {
 			eventcache.CacheRetries(eventcache.AncestorsInfo).Inc()
+			logger.Trace(logger.GetLogger(), "Execve Retry missing ancestors",
+				append(logProcessInternalFields("process", internal),
+					"error", err)...)
 			return eventcache.ErrFailedToGetAncestorsInfo
 		}
 	}
@@ -271,6 +340,10 @@ func (msg *MsgExecveEventUnix) Retry(internal *process.ProcessInternal, ev notif
 		// Retry() is going to be executed in the cache loop handling function, but
 		// HandleMessage may enqueue something in the cache channel. To avoid a deadlock,
 		// execute the cleanup message handling in a separate goroutine.
+		logger.Trace(logger.GetLogger(), "Execve Retry cleanup event",
+			append(logProcessInternalFields("process", internal),
+				"cleanup.pid", cleanupEvent.PID,
+				"cleanup.ktime", cleanupEvent.Ktime)...)
 		go cleanupEvent.HandleMessage()
 	}
 
@@ -281,6 +354,10 @@ func (msg *MsgExecveEventUnix) HandleMessage() *tetragon.GetEventsResponse {
 	var res *tetragon.GetEventsResponse
 
 	msg.RefCntDone = [3]bool{true, false, false}
+	logger.Trace(logger.GetLogger(), "Execve HandleMessage",
+		"event.pid", msg.Unix.Process.PID,
+		"event.nspid", msg.Unix.Process.NSPID,
+		"event.ktime", msg.Unix.Msg.Common.Ktime)
 	if e := GetProcessExec(msg, true); e != nil {
 		res = &tetragon.GetEventsResponse{
 			Event: &tetragon.GetEventsResponse_ProcessExec{ProcessExec: e},
@@ -369,17 +446,18 @@ func (msg *MsgCloneEventUnix) HandleMessage() *tetragon.GetEventsResponse {
 	var ancestors []*process.ProcessInternal
 
 	proc, _ := process.AddCloneEvent(&msg.MsgCloneEvent)
+	if proc == nil {
+		// Clone event failed (missing parent or duplicate). Try event cache.
+		if ec := eventcache.Get(); ec != nil {
+			ec.Add(nil, nil, msg.Common.Ktime, msg.Ktime, msg)
+		}
+		return nil
+	}
 	if option.Config.EnableProcessAncestors && proc.NeededAncestors() {
 		ancestors, _ = process.GetAncestorProcessesInternal(proc.UnsafeGetProcess().ParentExecId)
 	}
 
 	if ec := eventcache.Get(); ec != nil {
-		if proc == nil {
-			// adding to the cache due to missing parent
-			ec.Add(nil, nil, msg.Common.Ktime, msg.Ktime, msg)
-			return nil
-		}
-
 		parent, _ := process.Get(proc.UnsafeGetProcess().ParentExecId)
 
 		if ec.Needed(proc.UnsafeGetProcess()) ||
@@ -482,7 +560,21 @@ func GetProcessExit(event *MsgExitEventUnix) *tetragon.ProcessExit {
 
 	if tetragonProcess.Pid == nil {
 		eventcache.CacheErrors(eventcache.NilProcessPid, notify.EventType(tetragonEvent)).Inc()
+		logger.Trace(logger.GetLogger(), "GetProcessExit missing pid",
+			append(logProcessFields("process", tetragonProcess),
+				"event_cache", true)...)
 		return nil
+	}
+
+	// Mark process as exited before cache check. ProcessExit (CAS) and
+	// ChildExit (map) are both idempotent, so the Retry path calling them
+	// again is a no-op. Doing this early ensures the process is marked as
+	// exited even if the event is cached waiting for pod info.
+	// The process won't be deleted before the gRPC response is sent because
+	// GC uses multiple ticks (deletePending → deleteReady → deleted) and
+	// the protobuf Process in the event is a separate copy.
+	if proc != nil {
+		proc.ProcessExit()
 	}
 
 	if ec := eventcache.Get(); ec != nil &&
@@ -492,17 +584,10 @@ func GetProcessExit(event *MsgExitEventUnix) *tetragon.ProcessExit {
 		ec.Add(nil, tetragonEvent, event.Common.Ktime, event.ProcessKey.Ktime, event)
 		return nil
 	}
-
 	if option.Config.EnableProcessAncestors {
 		for _, ancestor := range ancestors {
 			ancestor.RefDec("ancestor")
 		}
-	}
-	if parent != nil {
-		parent.RefDec("parent")
-	}
-	if proc != nil {
-		proc.RefDec("process")
 	}
 	return tetragonEvent
 }
@@ -527,9 +612,15 @@ func (msg *MsgExitEventUnix) RetryInternal(ev notify.Event, timestamp uint64) (*
 				tetragonAncestors = append(tetragonAncestors, ancestor.UnsafeGetProcess())
 			}
 			ev.SetAncestors(tetragonAncestors)
+			logger.Trace(logger.GetLogger(), "Exit RetryInternal ancestors collected",
+				append(logProcessInternalFields("process", proc),
+					"ancestors.count", len(ancestors))...)
 		} else {
 			eventcache.CacheRetries(eventcache.AncestorsInfo).Inc()
 			err = eventcache.ErrFailedToGetAncestorsInfo
+			logger.Trace(logger.GetLogger(), "Exit RetryInternal missing ancestors",
+				append(logProcessInternalFields("process", proc),
+					"error", perr)...)
 		}
 	}
 
@@ -538,6 +629,9 @@ func (msg *MsgExitEventUnix) RetryInternal(ev notify.Event, timestamp uint64) (*
 	} else {
 		eventcache.CacheRetries(eventcache.ParentInfo).Inc()
 		err = eventcache.ErrFailedToGetParentInfo
+		logger.Trace(logger.GetLogger(), "Exit RetryInternal missing parent",
+			"parent.exec_id", msg.ProcessKey.Pid,
+			"error", err)
 	}
 
 	if proc != nil {
@@ -546,6 +640,8 @@ func (msg *MsgExitEventUnix) RetryInternal(ev notify.Event, timestamp uint64) (*
 	} else {
 		eventcache.CacheRetries(eventcache.ProcessInfo).Inc()
 		err = eventcache.ErrFailedToGetProcessInfo
+		logger.Trace(logger.GetLogger(), "Exit RetryInternal missing process",
+			"error", err)
 	}
 
 	if err == nil {
@@ -567,20 +663,17 @@ func (msg *MsgExitEventUnix) Retry(internal *process.ProcessInternal, ev notify.
 				ancestor.RefDec("ancestor")
 			}
 			msg.RefCntDone[AncestorsRefCnt] = true
+			logger.Trace(logger.GetLogger(), "Exit Retry ancestors refcnt--",
+				append(logProcessInternalFields("process", internal),
+					"ancestors.count", len(ancestors))...)
 		}
 	}
 
-	if tetragonProcess.Pid.Value > 1 && !msg.RefCntDone[ParentRefCnt] {
-		if parent, _ := process.Get(tetragonProcess.ParentExecId); parent != nil {
-			parent.RefDec("parent")
-			msg.RefCntDone[ParentRefCnt] = true
-		}
-	}
-
-	if !msg.RefCntDone[ProcessRefCnt] {
-		internal.RefDec("process")
-		msg.RefCntDone[ProcessRefCnt] = true
-	}
+	// No RefCntDone guard needed: ProcessExit (CAS) is idempotent.
+	internal.ProcessExit()
+	logger.Trace(logger.GetLogger(), "Exit Retry process refcnt--",
+		append(logProcessInternalFields("process", internal),
+			"process.exec_id", tetragonProcess.ExecId)...)
 
 	return nil
 }
@@ -589,6 +682,9 @@ func (msg *MsgExitEventUnix) HandleMessage() *tetragon.GetEventsResponse {
 	var res *tetragon.GetEventsResponse
 
 	msg.RefCntDone = [3]bool{false, false, false}
+	logger.Trace(logger.GetLogger(), "Exit HandleMessage",
+		"event.pid", msg.ProcessKey.Pid,
+		"event.ktime", msg.ProcessKey.Ktime)
 	e := GetProcessExit(msg)
 	if e != nil {
 		res = &tetragon.GetEventsResponse{
@@ -617,37 +713,42 @@ func (msg *MsgProcessCleanupEventUnix) Notify() bool {
 func (msg *MsgProcessCleanupEventUnix) RetryInternal(_ notify.Event, timestamp uint64) (*process.ProcessInternal, error) {
 	proc, parent := process.GetParentProcessInternal(msg.PID, timestamp)
 	var err error
-
 	if option.Config.EnableProcessAncestors && proc.NeededAncestors() && !msg.RefCntDone[AncestorsRefCnt] {
 		if ancestors, perr := process.GetAncestorProcessesInternal(proc.UnsafeGetProcess().ParentExecId); perr == nil {
 			for _, ancestor := range ancestors {
 				ancestor.RefDec("ancestor")
 			}
 			msg.RefCntDone[AncestorsRefCnt] = true
+			logger.Trace(logger.GetLogger(), "Cleanup RetryInternal ancestors refcnt--",
+				append(logProcessInternalFields("process", proc),
+					"ancestors.count", len(ancestors))...)
 		} else {
 			eventcache.CacheRetries(eventcache.AncestorsInfo).Inc()
 			err = eventcache.ErrFailedToGetAncestorsInfo
+			logger.Trace(logger.GetLogger(), "Cleanup RetryInternal missing ancestors",
+				append(logProcessInternalFields("process", proc),
+					"error", perr)...)
 		}
 	}
 
-	if parent != nil {
-		if !msg.RefCntDone[ParentRefCnt] {
-			parent.RefDec("parent")
-			msg.RefCntDone[ParentRefCnt] = true
-		}
-	} else {
+	if parent == nil {
 		eventcache.CacheRetries(eventcache.ParentInfo).Inc()
 		err = eventcache.ErrFailedToGetParentInfo
+		logger.Trace(logger.GetLogger(), "Cleanup RetryInternal missing parent",
+			"parent.exec_id", msg.PID,
+			"error", err)
 	}
 
 	if proc != nil {
-		if !msg.RefCntDone[ProcessRefCnt] {
-			proc.RefDec("process")
-			msg.RefCntDone[ProcessRefCnt] = true
-		}
+		proc.ProcessExit()
+		logger.Trace(logger.GetLogger(), "Cleanup RetryInternal process refcnt--",
+			append(logProcessInternalFields("process", proc),
+				"process.exec_id", proc.UnsafeGetProcess().ExecId)...)
 	} else {
 		eventcache.CacheRetries(eventcache.ProcessInfo).Inc()
 		err = eventcache.ErrFailedToGetProcessInfo
+		logger.Trace(logger.GetLogger(), "Cleanup RetryInternal missing process",
+			"error", err)
 	}
 
 	if err == nil {
@@ -664,9 +765,17 @@ func (msg *MsgProcessCleanupEventUnix) HandleMessage() *tetragon.GetEventsRespon
 	var ancestors []*process.ProcessInternal
 
 	msg.RefCntDone = [3]bool{false, false, false}
+	logger.Trace(logger.GetLogger(), "Cleanup HandleMessage",
+		"cleanup.pid", msg.PID,
+		"cleanup.ktime", msg.Ktime)
 	proc, parent := process.GetParentProcessInternal(msg.PID, msg.Ktime)
 	if option.Config.EnableProcessAncestors && proc.NeededAncestors() {
 		ancestors, _ = process.GetAncestorProcessesInternal(proc.UnsafeGetProcess().ParentExecId)
+	}
+
+	// ProcessExit is idempotent — safe before cache check.
+	if proc != nil {
+		proc.ProcessExit()
 	}
 
 	if ec := eventcache.Get(); ec != nil &&
@@ -681,12 +790,6 @@ func (msg *MsgProcessCleanupEventUnix) HandleMessage() *tetragon.GetEventsRespon
 		for _, ancestor := range ancestors {
 			ancestor.RefDec("ancestor")
 		}
-	}
-	if parent != nil {
-		parent.RefDec("parent")
-	}
-	if proc != nil {
-		proc.RefDec("process")
 	}
 	return nil
 }

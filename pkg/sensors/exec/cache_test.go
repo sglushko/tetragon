@@ -50,12 +50,12 @@ func TestProcessCacheInterval(t *testing.T) {
 	pid := cmd.Process.Pid
 	time.Sleep(50 * time.Millisecond)
 
-	processes := process.DumpProcessCache(&tetragon.DumpProcessCacheReqArgs{SkipZeroRefcnt: false, ExcludeExecveMapProcesses: false})
+	processes := process.DumpProcessCache(&tetragon.DumpProcessCacheReqArgs{SkipRemovable: false, ExcludeExecveMapProcesses: false})
 	// Should find our sleep process in the list, even though the process should have finished.
 	require.True(t, processInList(uint32(pid), processes))
 
 	time.Sleep(500 * time.Millisecond)
-	processes = process.DumpProcessCache(&tetragon.DumpProcessCacheReqArgs{SkipZeroRefcnt: false, ExcludeExecveMapProcesses: false})
+	processes = process.DumpProcessCache(&tetragon.DumpProcessCacheReqArgs{SkipRemovable: false, ExcludeExecveMapProcesses: false})
 	// Should not find our sleep process in the list, as it should have been evicted by now.
 	require.False(t, processInList(uint32(pid), processes))
 }

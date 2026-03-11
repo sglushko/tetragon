@@ -10,7 +10,6 @@ import (
 
 	"github.com/cilium/tetragon/api/v1/tetragon"
 	tetragonAPI "github.com/cilium/tetragon/pkg/api/processapi"
-	"github.com/cilium/tetragon/pkg/defaults"
 	"github.com/cilium/tetragon/pkg/eventcache"
 	"github.com/cilium/tetragon/pkg/option"
 	"github.com/cilium/tetragon/pkg/process"
@@ -387,7 +386,7 @@ func CreateAncestorEvents[EXEC notify.Message, EXIT notify.Message](
 }
 
 func InitEnv[EXEC notify.Message, EXIT notify.Message](t *testing.T, watcher watcher.PodAccessor) DummyNotifier[EXEC, EXIT] {
-	if err := process.InitCache(watcher, 65536, defaults.DefaultProcessCacheGCInterval); err != nil {
+	if err := process.InitCacheForTest(watcher, 65536); err != nil {
 		t.Fatalf("failed to call process.InitCache %s", err)
 	}
 
@@ -403,7 +402,7 @@ func GetProcessRefcntFromCache(t *testing.T, Pid uint32, Ktime uint64) uint32 {
 	procID := process.GetProcessID(Pid, Ktime)
 	proc, err := process.Get(procID)
 	if err == nil {
-		return proc.RefGet()
+		return proc.RefcntOpsSum()
 	}
 
 	t.Fatalf("failed to find a process in the procCache pid: %d, ktime: %d, ID: %s ", Pid, Ktime, err)
