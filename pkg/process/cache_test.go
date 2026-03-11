@@ -16,7 +16,12 @@ import (
 
 func TestProcessCache(t *testing.T) {
 	// add a process to the cache.
-	cache, err := NewCache(10, defaults.DefaultProcessCacheGCInterval)
+	cache, err := NewCache(10,
+		defaults.DefaultProcessCacheGCInterval,
+		defaults.DefaultProcessCacheStaleInterval,
+		defaults.DefaultProcessCacheStaleThreshold,
+		defaults.DefaultProcessCacheStaleBackoffMultiplier,
+	)
 	require.NoError(t, err)
 	pid := wrapperspb.UInt32Value{Value: 1234}
 	execID := "process1"
@@ -31,6 +36,8 @@ func TestProcessCache(t *testing.T) {
 				tetragon.CapabilitiesType_CAP_AUDIT_WRITE,
 			},
 		},
+		refcntOps: make(map[string]int32),
+		lifecycle: NewLifecycle(),
 	}
 	cache.add(&proc)
 	assert.Equal(t, 1, cache.len())
