@@ -1928,8 +1928,9 @@ Determines the behavior of a field filter
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| skip_zero_refcnt | [bool](#bool) |  |  |
+| skip_zero_refcnt | [bool](#bool) |  | **Deprecated.** Deprecated: use skip_removable instead. |
 | exclude_execve_map_processes | [bool](#bool) |  |  |
+| skip_removable | [bool](#bool) |  | skip_removable skips processes whose lifecycle state allows removal (i.e. exited and no active children). Replaces skip_zero_refcnt. |
 
 
 
@@ -2199,8 +2200,9 @@ Determines the behavior of a field filter
 | ----- | ---- | ----- | ----------- |
 | process | [Process](#tetragon-Process) |  |  |
 | color | [string](#string) |  |  |
-| refcnt | [google.protobuf.UInt32Value](#google-protobuf-UInt32Value) |  |  |
+| refcnt | [google.protobuf.UInt32Value](#google-protobuf-UInt32Value) |  | refcnt is the sum of all refcnt_ops. Provided for debug visibility; for cache eviction logic, use lifecycle state instead. |
 | refcnt_ops | [ProcessInternal.RefcntOpsEntry](#tetragon-ProcessInternal-RefcntOpsEntry) | repeated | refcnt_ops is a map of operations to refcnt change keys can be: - &#34;process&#43;&#43;&#34;: process increased refcnt (i.e. this process starts) - &#34;process--&#34;: process decreased refcnt (i.e. this process exits) - &#34;parent&#43;&#43;&#34;: parent increased refcnt (i.e. a process starts that has this process as a parent) - &#34;parent--&#34;: parent decreased refcnt (i.e. a process exits that has this process as a parent) - &#34;ancestor&#43;&#43;&#34;: ancestor increased refcnt (i.e. a process starts that has this process as an ancestor) - &#34;ancestor--&#34;: ancestor decreased refcnt (i.e. a process exits that has this process as an ancestor) |
+| lifecycle | [google.protobuf.Struct](#google-protobuf-Struct) |  | lifecycle is a structured snapshot of process lifecycle state |
 
 
 

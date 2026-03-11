@@ -6,6 +6,7 @@ syntax = "proto3";
 package tetragon;
 
 import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
 import "google/protobuf/wrappers.proto";
 import "tetragon/events.proto";
 import "tetragon/tetragon.proto";
@@ -214,13 +215,19 @@ enum LogLevel {
 }
 
 message DumpProcessCacheReqArgs {
-  bool skip_zero_refcnt = 1;
+  // Deprecated: use skip_removable instead.
+  bool skip_zero_refcnt = 1 [deprecated = true];
   bool exclude_execve_map_processes = 2;
+  // skip_removable skips processes whose lifecycle state allows removal
+  // (i.e. exited and no active children). Replaces skip_zero_refcnt.
+  bool skip_removable = 3;
 }
 
 message ProcessInternal {
   Process process = 1;
   string color = 2;
+  // refcnt is the sum of all refcnt_ops. Provided for debug visibility;
+  // for cache eviction logic, use lifecycle state instead.
   google.protobuf.UInt32Value refcnt = 3;
   // refcnt_ops is a map of operations to refcnt change
   // keys can be:
@@ -231,6 +238,8 @@ message ProcessInternal {
   // - "ancestor++": ancestor increased refcnt (i.e. a process starts that has this process as an ancestor)
   // - "ancestor--": ancestor decreased refcnt (i.e. a process exits that has this process as an ancestor)
   map<string, int32> refcnt_ops = 4;
+  // lifecycle is a structured snapshot of process lifecycle state
+  google.protobuf.Struct lifecycle = 5;
 }
 
 message DumpProcessCacheResArgs {
